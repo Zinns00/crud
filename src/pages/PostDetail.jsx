@@ -2,6 +2,8 @@
 import { useParams, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { supabase } from "../supabase";
+import { getOrSetAnonymousToken } from "./token"; // 토큰 유틸리티 import
+import CommentItem from "@/components/CommentItem"; // CommentItem 컴포넌트 import
 
 function PostDetail() {
     const { id } = useParams();
@@ -13,43 +15,64 @@ function PostDetail() {
     // 댓글 관련 상태 추가
     const [comments, setComments] = useState([]);
     const [newComment, setNewComment] = useState("");
+    const [currentUser, setCurrentUser] = useState(null);
+
+    const [anonymousToken, setAnonymousToken] = useState(null);
+    // 댓글 '수정' 관련 상태 추가
+    const [editingId, setEditingId] = useState(null); // 현재 수정 중인 댓글의 id
+    const [editingText, setEditingText] = useState(""); // 수정 중인 댓글의 내용
 
     useEffect(() => {
-        getPost();
-        getComments(); // 게시글 불러올 때 댓글도 같이 불러옴
-    }, []);
+        // 현재 로그인한 사용자 정보 가져오기
+        const fetchData = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            setCurrentUser(user);
 
-    // 1. 게시글 가져오기
-    async function getPost() {
+            // 익명 사용자의 경우, 로컬 스토리지에서 토큰을 가져옵니다.
+            if (!user) {
+                setAnonymousToken(localStorage.getItem('anonymousUserToken'));
+            }
+
+            // 게시글과 댓글 정보를 동시에 가져옵니다.
+            const [postData, commentsData] = await Promise.all([
+                getPost(),
+                getComments()
+            ]);
+
+            if (postData) setPost(postData);
+            if (commentsData) setComments(commentsData);
+
+            setLoading(false); // 모든 데이터 로딩 완료 후 로딩 상태 변경
+        };
+        fetchData();
+    }, [id]); // id가 바뀔 때마다 데이터를 다시 불러옵니다.
+
+    // 게시글 가져오기
+    async function getPost() { // 데이터를 반환하도록 수정
         const { data, error } = await supabase
             .from('post')
             .select('*')
             .eq('id', id)
             .single();
 
-        if (error) {
-            console.log("게시글 에러:", error);
-        } else {
-            setPost(data);
-        }
-        setLoading(false);
+        return data;
     }
 
-    // ★ 1. 삭제 기능 함수 추가
+    // 게시글 삭제 기능
     async function handleDelete() {
         const confirmDelete = window.confirm("진짜로 삭제하시겠습니까?");
         if (!confirmDelete) return;
 
         const { error } = await supabase
-            .from('post') // 테이블 이름 'post' 확인
+            .from('post')
             .delete()
-            .eq('id', id); // 현재 보고 있는 글 번호(id)를 삭제
+            .eq('id', id);
 
         if (error) {
-            alert("삭제 실패!");
+            alert("삭제 중 오류가 발생했습니다: " + error.message);
         } else {
             alert("삭제되었습니다.");
-            navigate("/"); // 삭제 후 목록으로 이동
+            navigate("/");
         }
     }
 
@@ -57,9 +80,7 @@ function PostDetail() {
         navigate(`/edit/${id}`);
     }
 
-    if (loading) return <div>로딩 중...</div>;
-
-    // 2. 댓글 가져오기 (이 글에 달린 것만!)
+    // 댓글 가져오기 (현재 게시글에 해당하는 댓글만)
     async function getComments() {
         const { data, error } = await supabase
             .from('comment') // comment 테이블에서
@@ -67,28 +88,85 @@ function PostDetail() {
             .eq('post_id', id) // post_id가 현재 글 번호(id)랑 같은 것만 가져와!
             .order('created_at', { ascending: true }); // 과거순 정렬
 
-        if (!error) {
-            setComments(data);
-        }
+        return data;
     }
 
-    // 3. 댓글 작성하기
+    // 댓글 작성하기
     async function handleCommentSubmit() {
         if (!newComment) return;
+        // 로그인 상태에 따라 작성자 이름을 설정합니다.
+        const authorName = currentUser ? currentUser.user_metadata?.username : "익명";
+
+        const commentData = {
+            content: newComment,
+            author: authorName,
+            post_id: id
+        };
+
+        // 익명 댓글일 경우, 수정 토큰을 추가합니다.
+        if (!currentUser) {
+            commentData.edit_token = getOrSetAnonymousToken();
+        }
 
         const { error } = await supabase
             .from('comment')
-            .insert({
-                content: newComment,
-                author: "익명",
-                post_id: id // ★ 중요: 현재 보고 있는 글 번호를 같이 저장
-            });
+            .insert([commentData]);
 
         if (error) {
             alert("댓글 작성 실패!");
         } else {
             setNewComment(""); // 입력창 비우기
-            getComments(); // 댓글 목록 새로고침
+            getComments().then(data => setComments(data)); // 댓글 목록 새로고침
+        }
+    }
+
+    // 댓글 삭제하기 (CommentItem으로 전달)
+    async function deleteComment(commentId) {
+        if (window.confirm("정말로 이 댓글을 삭제하시겠습니까?")) {
+            const { error } = await supabase
+                .from('comment')
+                .delete()
+                .eq('id', commentId);
+
+            if (error) {
+                alert("댓글 삭제에 실패했습니다: " + error.message);
+            } else {
+                alert("댓글이 삭제되었습니다.");
+                getComments().then(data => setComments(data)); // 댓글 목록 새로고침
+            }
+        }
+    }
+
+    // 댓글 수정 시작 (수정 모드로 전환)
+    function startEditing(comment) {
+        setEditingId(comment.id);
+        setEditingText(comment.content);
+    }
+
+    // 댓글 수정 취소
+    function cancelEditing() {
+        setEditingId(null);
+        setEditingText("");
+    }
+
+    // 수정된 댓글 저장하기 (CommentItem으로 전달)
+    async function saveEditedComment(commentId) {
+        if (!editingText) {
+            alert("내용을 입력해주세요.");
+            return;
+        }
+
+        const { error } = await supabase
+            .from('comment')
+            .update({ content: editingText })
+            .eq('id', commentId);
+
+        if (error) {
+            alert("댓글 수정에 실패했습니다: " + error.message);
+        } else {
+            alert("댓글이 수정되었습니다.");
+            cancelEditing(); // 수정 모드 종료
+            getComments().then(data => setComments(data)); // 댓글 목록 새로고침
         }
     }
 
@@ -106,20 +184,30 @@ function PostDetail() {
             </div>
             <button onClick={() => navigate("/")}>목록으로</button>
 
-            {/* ★ 3. 수정/삭제 버튼 추가 */}
-            <button
-                onClick={goEditPage}
-                style={{ marginLeft: "10px", background: "orange", color: "white", border: "none", padding: "5px 10px" }}
-            >
-                수정
-            </button>
-
-            <button
-                onClick={handleDelete}
-                style={{ marginLeft: "10px", background: "red", color: "white", border: "none", padding: "5px 10px" }}
-            >
-                삭제
-            </button>
+            {/*
+              수정/삭제 버튼 표시 조건:
+              1. 로그인한 사용자가 자기 게시글을 볼 때
+              2. 로그인하지 않은 사용자가 '익명' 게시글을 볼 때 (토큰 일치 확인)
+            */}
+            {((currentUser && currentUser.user_metadata?.username === post.author) ||
+                (!currentUser && post.author === "익명" && anonymousToken && post.edit_token === anonymousToken)) && (
+                    <>
+                        {/* 수정 버튼 */}
+                        <button
+                            onClick={goEditPage}
+                            style={{ marginLeft: "10px", background: "orange", color: "white", border: "none", padding: "5px 10px" }}
+                        >
+                            수정
+                        </button>
+                        {/* 삭제 버튼 */}
+                        <button
+                            onClick={handleDelete}
+                            style={{ marginLeft: "10px", background: "red", color: "white", border: "none", padding: "5px 10px" }}
+                        >
+                            삭제
+                        </button>
+                    </>
+                )}
 
             {/* --- 댓글 영역 (새로 추가됨) --- */}
             <div style={{ marginTop: "50px", borderTop: "2px solid #eee", paddingTop: "20px" }}>
@@ -140,12 +228,19 @@ function PostDetail() {
                 {/* 댓글 목록 */}
                 <ul style={{ listStyle: "none", padding: 0 }}>
                     {comments.map((comment) => (
-                        <li key={comment.id} style={{ background: "#f9f9f9", padding: "10px", marginBottom: "5px", borderRadius: "5px" }}>
-                            <strong>{comment.author}</strong>: {comment.content}
-                            <span style={{ fontSize: "12px", color: "#888", marginLeft: "10px" }}>
-                                {new Date(comment.created_at).toLocaleString()}
-                            </span>
-                        </li>
+                        <CommentItem
+                            key={comment.id}
+                            comment={comment}
+                            currentUser={currentUser}
+                            anonymousToken={anonymousToken}
+                            isEditing={editingId === comment.id}
+                            editingText={editingText}
+                            onEditingTextChange={setEditingText}
+                            onStartEdit={startEditing}
+                            onCancelEdit={cancelEditing}
+                            onSaveEdit={saveEditedComment}
+                            onDelete={deleteComment}
+                        />
                     ))}
                 </ul>
             </div>
